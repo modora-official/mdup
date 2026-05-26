@@ -99,44 +99,81 @@ if (isset($_SESSION['login']) && isset($_POST['action_type'])) {
         $url_input = trim($_POST['url_download']);
         $url_target = $url_input;
         
+        // Logika Ekstraktor MediaFire yang Diperkuat
         if (strpos($url_input, 'mediafire.com') !== false) {
             $ch_mf = curl_init($url_input);
             curl_setopt($ch_mf, CURLOPT_RETURNTRANSFER, true);
             curl_setopt($ch_mf, CURLOPT_FOLLOWLOCATION, true);
             curl_setopt($ch_mf, CURLOPT_SSL_VERIFYPEER, false);
+            // Tambahkan User-Agent browser asli dan izinkan encode GZIP
+            curl_setopt($ch_mf, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+            curl_setopt($ch_mf, CURLOPT_ENCODING, "");
             $html = curl_exec($ch_mf);
             curl_close($ch_mf);
-            if (preg_match('/id="downloadButton" href="(.*?)"/', $html, $matches)) $url_target = $matches[1];
+            
+            // Regex agresif: Mencari URL tidak peduli urutan atribut HTML-nya
+            if (preg_match('/href="([^"]+)"[^>]*id="downloadButton"/i', $html, $matches) || 
+                preg_match('/id="downloadButton"[^>]*href="([^"]+)"/i', $html, $matches)) {
+                $url_target = $matches[1];
+            } else if (preg_match('/\bhref="([^"]+)"/i', $html, $matches_all)) {
+                preg_match_all('/href="([^"]+)"/i', $html, $links);
+                foreach($links[1] as $link) {
+                    if(strpos($link, 'download') !== false && strpos($link, 'mediafire.com') !== false) {
+                        $url_target = $link;
+                        break;
+                    }
+                }
+            }
+
+            // Keamanan: Cegah unduhan file palsu jika gagal menembus keamanan Mediafire
+            if ($url_target == $url_input) {
+                $pesan = "<div class='alert error'><i class='fa-solid fa-triangle-exclamation'></i> Ekstensi gagal! Sistem gagal menembus link asli MediaFire. Pastikan Anda tidak memasukkan link Folder.</div>";
+            }
         }
 
-        $ch = curl_init($url_target);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_HEADER, true);
-        curl_setopt($ch, CURLOPT_NOBODY, true);
-        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-        $header_data = curl_exec($ch);
-        $final_url = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
-        curl_close($ch);
-
-        $nama_file = !empty($custom_name) ? $custom_name : getFilenameFromUrl($final_url, $header_data);
-        $nama_file = preg_replace('/[^a-zA-Z0-9_.-]/', '_', $nama_file);
-        $target_file = $DIREKTORI_UPLOAD . $nama_file;
-
-        $fp = fopen($target_file, 'w+');
-        if ($fp) {
-            $ch = curl_init($final_url);
-            curl_setopt($ch, CURLOPT_FILE, $fp);
+        if (empty($pesan)) {
+            $ch = curl_init($url_target);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_HEADER, true);
+            curl_setopt($ch, CURLOPT_NOBODY, true);
             curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+            curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)');
             curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-            $sukses = curl_exec($ch);
+            $header_data = curl_exec($ch);
+            $final_url = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
             curl_close($ch);
-            fclose($fp);
-            if ($sukses) {
-                $pesan = "<div class='alert success'><i class='fa-solid fa-circle-check'></i> File <strong>$nama_file</strong> berhasil ditarik ke server.</div>";
-            } else {
-                unlink($target_file);
-                $pesan = "<div class='alert error'><i class='fa-solid fa-circle-xmark'></i> Gagal menarik file.</div>";
+
+            $nama_file = !empty($custom_name) ? $custom_name : getFilenameFromUrl($final_url, $header_data);
+            $nama_file = preg_replace('/[^a-zA-Z0-9_.-]/', '_', $nama_file);
+            
+            // Perbaikan jika MediaFire tidak memberikan format ekstensi secara utuh
+            if(strpos($url_input, '.apk') !== false && strpos($nama_file, '.apk') === false) {
+                $nama_file .= '.apk';
+            }
+
+            $target_file = $DIREKTORI_UPLOAD . $nama_file;
+
+            $fp = fopen($target_file, 'w+');
+            if ($fp) {
+                $ch = curl_init($final_url);
+                curl_setopt($ch, CURLOPT_FILE, $fp);
+                curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+                curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)');
+                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+                $sukses = curl_exec($ch);
+                curl_close($ch);
+                fclose($fp);
+                
+                // Pastikan file tidak *corrupt* atau berupa file HTML nyasar
+                if ($sukses && filesize($target_file) > 100000) { 
+                    $pesan = "<div class='alert success'><i class='fa-solid fa-circle-check'></i> File <strong>$nama_file</strong> berhasil ditarik ke server! (" . formatSizeUnits(filesize($target_file)) . ")</div>";
+                } else if ($sukses) {
+                    unlink($target_file); 
+                    $pesan = "<div class='alert error'><i class='fa-solid fa-circle-xmark'></i> Gagal! MediaFire memblokir tarikan server atau link kadaluarsa.</div>";
+                } else {
+                    unlink($target_file);
+                    $pesan = "<div class='alert error'><i class='fa-solid fa-circle-xmark'></i> Gagal menarik file ke VPS.</div>";
+                }
             }
         }
     } 
@@ -338,10 +375,9 @@ if (isset($_SESSION['login']) && isset($_POST['action_type'])) {
                             document.getElementById('progressBar').style.width = percent + '%';
                             document.getElementById('percentDisplay').innerText = percent + '%';
 
-                            // Kalkulasi Kecepatan
                             let currentTime = new Date().getTime();
-                            let timeDiff = (currentTime - startTime) / 1000; // dalam detik
-                            if(timeDiff > 0.5) { // update tiap 0.5 detik
+                            let timeDiff = (currentTime - startTime) / 1000;
+                            if(timeDiff > 0.5) {
                                 let loadedDiff = e.loaded - previousLoaded;
                                 let speedBps = loadedDiff / timeDiff;
                                 
@@ -356,7 +392,6 @@ if (isset($_SESSION['login']) && isset($_POST['action_type'])) {
                                 previousLoaded = e.loaded;
                             }
 
-                            // Tampilan Ukuran
                             let totalMB = (e.total / 1048576).toFixed(2);
                             let loadedMB = (e.loaded / 1048576).toFixed(2);
                             document.getElementById('sizeDisplay').innerText = loadedMB + " MB / " + totalMB + " MB";
